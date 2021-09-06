@@ -6,29 +6,142 @@ const DPI_WIDTH = WIDTH * 2;
 const DPI_HEIGHT = HEIGHT * 2;
 const VIEW_HEIGHT = DPI_HEIGHT - PADDING * 2;
 const VIEW_WIDTH = DPI_WIDTH;
+const CIRCLE_RADIUS = 8;
 
 const ROWS_COUNT = 5;
 
+const tgChart = chart(document.getElementById('chart'), getChartData());
+tgChart.init();
 
 function chart(canvas, data) {
-    console.log(data);
-
     const cntx = canvas.getContext('2d');
+
+    let RAF
+
     canvas.style.width = WIDTH + 'px';
     canvas.style.height = HEIGHT + 'px';
     canvas.width = DPI_WIDTH;
     canvas.height = DPI_HEIGHT;
 
-    const [yMin, yMax] = computeBounds(data);
-    const yRatio = VIEW_HEIGHT / (yMax - yMin);
-    const xRatio = VIEW_WIDTH / (data.columns[0].length - 2);
+    const proxy = new Proxy(
+        {}, {
 
-    // x axis ===============================
+            set(...args) {
+                const result = Reflect.set(...args)
+
+                RAF = requestAnimationFrame(paint);
+
+                return result;
+            },
+        })
+
+    function mousemove({clientX, clientY}) {
+        const { left } = canvas.getBoundingClientRect();
+
+        proxy.mouse = {
+            x: (clientX - left) * 2,
+        }
+    }
+
+    function mouseleave() {
+        proxy.mouse = null;
+    }
+
+    canvas.addEventListener('mousemove', mousemove);
+    canvas.addEventListener('mouseleave', mouseleave);
+
+
+    function clear() {
+        cntx.clearRect(0, 0, DPI_WIDTH, DPI_HEIGHT);
+    }
+
+    function paint() {
+        clear();
+
+        const [yMin, yMax] = computeBounds(data);
+        const yRatio = VIEW_HEIGHT / (yMax - yMin);
+        const xRatio = VIEW_WIDTH / (data.columns[0].length - 2);
+
+        const yData = data.columns.filter(col => data.types[col[0]] === 'line');
+        const xData = data.columns.filter(col => data.types[col[0]] !== 'line')[0];
+
+        yAxis(cntx, yMax, yMin);
+        xAxis(cntx, xData, xRatio, proxy);
+
+        yData.map(toCoords(xRatio, yRatio)).forEach((coords, index) => {
+            const color = data.colors[yData[index][0]];
+
+            line(cntx, coords, {color});
+
+            for (const [x,y] of coords) {
+                if (isOver(proxy.mouse, x, coords.length)) {
+                    circle(cntx,[x,y], color);
+                    break;
+                }
+            }
+        })
+    }
+
+    paint();
+
+    return {
+        init() {
+            paint();
+        },
+        destroy() {
+            cancelAnimationFrame(RAF);
+            canvas.removeEventListener('mousemove', mousemove);
+            canvas.removeEventListener('mouseleave', mouseleave);
+        }
+    }
+}
+
+function toCoords(xRatio, yRatio) {
+    return (col) => {
+        return col
+            .map((y, index) => {
+                return [
+                    Math.floor((index - 1) * xRatio),
+                    Math.floor(DPI_HEIGHT - PADDING - y * yRatio)
+                ]
+            })
+            .filter((_, i) => i !== 0);
+    }
+}
+
+function xAxis(cntx, data, xRatio, {mouse}) {
+    const colsCount = 6;
+    const colsStep = Math.round(data.length / colsCount);
+
+    cntx.beginPath();
+
+    for (let i = 1; i < data.length; i++) {
+        const x = i * xRatio;
+
+        if (i % colsStep === 0) {
+            const text = toDate(data[i]);
+            cntx.fillText(text.toString(), x, DPI_HEIGHT - 10);
+        }
+
+        if (isOver(mouse,x,data.length)) {
+            cntx.save();
+            cntx.moveTo(x, PADDING / 2);
+            cntx.lineTo(x, DPI_HEIGHT - PADDING);
+            cntx.restore();
+        }
+    }
+
+    cntx.stroke();
+    cntx.closePath();
+}
+
+function yAxis(cntx, yMax, yMin) {
     const axisStep = VIEW_HEIGHT / ROWS_COUNT;
     const textStep = (yMax - yMin) / ROWS_COUNT;
 
     cntx.beginPath();
 
+    cntx.lineWidth = 1;
     cntx.strokeStyle = '#bbb';
     cntx.font = 'normal 20px Helvetica,sans-serif';
     cntx.fillStyle = '#96a2aa';
@@ -44,27 +157,7 @@ function chart(canvas, data) {
 
     cntx.stroke();
     cntx.closePath();
-    // ======================================
-
-
-    data.columns.forEach(col => {
-        const name = col[0];
-
-        if (data.types[name] === 'line') {
-            const coords = col.map((y, index) => {
-                return [
-                    Math.floor((index - 1) * xRatio),
-                    Math.floor(DPI_HEIGHT - PADDING - y * yRatio)]
-            })
-                .filter((_, i) => i !== 0);
-
-            const color = data.colors[name];
-
-            line(cntx, coords, {color});
-        }
-    })
 }
-
 
 function line(cntx, coords, {color}) {
     cntx.beginPath();
@@ -79,9 +172,15 @@ function line(cntx, coords, {color}) {
     cntx.closePath();
 }
 
-
-chart(document.getElementById('chart'), getChartData());
-
+function circle(cntx,[x,y], color) {
+    cntx.beginPath();
+    cntx.strokeStlye = color;
+    cntx.fillStyle = '#fff';
+    cntx.arc(x,y, CIRCLE_RADIUS, 0, Math.PI * 2);
+    cntx.fill();
+    cntx.stroke();
+    cntx.closePath();
+}
 
 function computeBounds({columns, types}) {
     let min;
@@ -107,6 +206,22 @@ function computeBounds({columns, types}) {
     return [min, max];
 }
 
+function toDate(timestamp) {
+    const shortMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const date = new Date(timestamp);
+
+    return `${shortMonths[date.getMonth()]} ${date.getDate()}`
+}
+
+function isOver(mouse, x, length) {
+    if (!mouse) {
+        return false;
+    }
+
+    const width = DPI_WIDTH / length;
+
+    return Math.abs(x - mouse.x) < width / 2;
+}
 
 function getChartData() {
     return [
@@ -474,3 +589,4 @@ function getChartData() {
         },
     ][0]
 }
+
